@@ -201,6 +201,7 @@ class GPT2LMHeadModel(nn.Module):
         self.lm_head.set_embeddings_weights(self.transformer.wte.weight)
 
     def forward(self, input_ids, position_ids=None, token_type_ids=None, lm_labels=None, past=None):
+        past = [p[...,-1023:,:] if p is not None else p for p in past] if past is not None else past
         hidden_states, presents = self.transformer(input_ids, position_ids, token_type_ids, past)
         lm_logits = self.lm_head(hidden_states)
         if lm_labels is not None:
