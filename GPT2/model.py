@@ -141,12 +141,18 @@ class GPT2Model(nn.Module):
         self.decoder = nn.Linear(embed_shape[1], embed_shape[0], bias=False)
         self.decoder.weight = model_embeddings_weights  # Tied weights
 
-    def forward(self, input_ids, position_ids=None, token_type_ids=None, past=None):
+    def forward(self, 
+                input_ids,
+                position_ids=None,
+                token_type_ids=None,
+                past=None):
+
         if past is None:
             past_length = 0
             past = [None] * len(self.h)
         else:
             past_length = past[0][0].size(-2)
+        
         if position_ids is None:
             position_ids = torch.arange(past_length, input_ids.size(-1) + past_length, dtype=torch.long,
                                         device=input_ids.device)
@@ -158,18 +164,23 @@ class GPT2Model(nn.Module):
 
         inputs_embeds = self.wte(input_ids)
         position_embeds = self.wpe(position_ids)
+        
         if token_type_ids is not None:
             token_type_ids = token_type_ids.view(-1, token_type_ids.size(-1))
             token_type_embeds = self.wte(token_type_ids)
         else:
             token_type_embeds = 0
         hidden_states = inputs_embeds + position_embeds + token_type_embeds
+        
         presents = []
+        
         for block, layer_past in zip(self.h, past):
             hidden_states, present = block(hidden_states, layer_past)
             presents.append(present)
+        
         hidden_states = self.ln_f(hidden_states)
         output_shape = input_shape + (hidden_states.size(-1),)
+        
         return hidden_states.view(*output_shape), presents
 
 class GPT2LMHead(nn.Module):
@@ -200,12 +211,25 @@ class GPT2LMHeadModel(nn.Module):
         """
         self.lm_head.set_embeddings_weights(self.transformer.wte.weight)
 
-    def forward(self, input_ids, position_ids=None, token_type_ids=None, lm_labels=None, past=None):
-        past = [p[...,-1023:,:] if p is not None else p for p in past] if past is not None else past
+    def forward(self,
+                input_ids,
+                position_ids=None,
+                token_type_ids=None,
+                lm_labels=None,
+                past=None):
+        
+        # if past is not None:
+        #     for j, p in enumerate(past):
+        #         if p is None:
+        #             continue
+        #         past[j] = p[..., -1023:,:]
+        
         hidden_states, presents = self.transformer(input_ids, position_ids, token_type_ids, past)
         lm_logits = self.lm_head(hidden_states)
+        
         if lm_labels is not None:
             loss_fct = nn.CrossEntropyLoss(ignore_index=-1)
             loss = loss_fct(lm_logits.view(-1, lm_logits.size(-1)), lm_labels.view(-1))
             return loss
+        
         return lm_logits, presents
