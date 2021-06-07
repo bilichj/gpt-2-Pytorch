@@ -1,9 +1,10 @@
-'''
-    code by TaeHwan Jung(@graykode)
-    Original Paper and repository here : https://github.com/openai/gpt-2
-    GPT2 Pytorch Model : https://github.com/huggingface/pytorch-pretrained-BERT
-'''
 import logging
+from functools import partial, lru_cache
+
+def cachedproperty(func=None, *, maxsize=128):
+    if func == None:
+        return partial(cachedproperty, maxsize=maxsize)
+    return property(lru_cache(maxsize=maxsize)(func))
 
 logger = logging.getLogger(__name__)
 

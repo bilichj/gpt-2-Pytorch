@@ -1,13 +1,13 @@
-'''
-    code by TaeHwan Jung(@graykode)
-    Original Paper and repository here : https://github.com/openai/gpt-2
-    GPT2 Pytorch Model : https://github.com/huggingface/pytorch-pretrained-BERT
-'''
+from __future__ import annotations
+
 import copy
 import torch
 import math
 import torch.nn as nn
 from torch.nn.parameter import Parameter
+from typing import Optional, List
+from itertools import chain
+from .data import GPT2Node
 
 def gelu(x):
     return 0.5 * x * (1 + torch.tanh(math.sqrt(2 / math.pi) * (x + 0.044715 * torch.pow(x, 3))))
@@ -80,15 +80,20 @@ class Attention(nn.Module):
 
     def forward(self, x, layer_past=None):
         x = self.c_attn(x)
-        query, key, value = x.split(self.split_size, dim=2)
+        query, present_key, present_value = x.split(self.split_size, dim=2)
         query = self.split_heads(query)
-        key = self.split_heads(key, k=True)
-        value = self.split_heads(value)
+        present_key = self.split_heads(present_key, k=True)
+        present_value = self.split_heads(present_value)
+        
         if layer_past is not None:
             past_key, past_value = layer_past[0].transpose(-2, -1), layer_past[1]  # transpose back cf below
-            key = torch.cat((past_key, key), dim=-1)
-            value = torch.cat((past_value, value), dim=-2)
-        present = torch.stack((key.transpose(-2, -1), value))  # transpose to have same shapes for stacking
+            key = torch.cat((past_key, present_key), dim=-1)
+            value = torch.cat((past_value, present_value), dim=-2)
+        else:
+            key = present_key
+            value = present_value
+        
+        present = torch.stack((present_key.transpose(-2, -1), present_value))  # transpose to have same shapes for stacking
         a = self._attn(query, key, value)
         a = self.merge_heads(a)
         a = self.c_proj(a)
@@ -141,45 +146,39 @@ class GPT2Model(nn.Module):
         self.decoder = nn.Linear(embed_shape[1], embed_shape[0], bias=False)
         self.decoder.weight = model_embeddings_weights  # Tied weights
 
-    def forward(self, 
-                input_ids,
-                position_ids=None,
-                token_type_ids=None,
-                past=None):
+    def forward(self, node, positions=None, token_type_ids=None):
 
-        if past is None:
-            past_length = 0
-            past = [None] * len(self.h)
-        else:
-            past_length = past[0][0].size(-2)
+        if positions is None:
+            positions = torch.arange(
+                len(node), 
+                node.tokens.size(-1) + len(node),
+                dtype=torch.long
+            ).unsqueeze(0).expand_as(node.tokens)
+
+        tokens_shape = node.tokens.size()
+        tokens = node.tokens.view(-1, node.tokens.size(-1))
+        positions = positions.view(-1, positions.size(-1))
+
+        token_embeddings = self.wte(node.tokens)
+        position_embeddings = self.wpe(positions)
         
-        if position_ids is None:
-            position_ids = torch.arange(past_length, input_ids.size(-1) + past_length, dtype=torch.long,
-                                        device=input_ids.device)
-            position_ids = position_ids.unsqueeze(0).expand_as(input_ids)
-
-        input_shape = input_ids.size()
-        input_ids = input_ids.view(-1, input_ids.size(-1))
-        position_ids = position_ids.view(-1, position_ids.size(-1))
-
-        inputs_embeds = self.wte(input_ids)
-        position_embeds = self.wpe(position_ids)
-        
+        # TODO: Understand token_type and move this to GPT2Node
         if token_type_ids is not None:
             token_type_ids = token_type_ids.view(-1, token_type_ids.size(-1))
-            token_type_embeds = self.wte(token_type_ids)
+            token_type_embeddings = self.wte(token_type_ids)
         else:
-            token_type_embeds = 0
-        hidden_states = inputs_embeds + position_embeds + token_type_embeds
+            token_type_embeddings = 0
+        
+        hidden_states = token_embeddings + position_embeddings + token_type_embeddings
         
         presents = []
         
-        for block, layer_past in zip(self.h, past):
+        for block, layer_past in zip(self.h, node.past):
             hidden_states, present = block(hidden_states, layer_past)
             presents.append(present)
         
         hidden_states = self.ln_f(hidden_states)
-        output_shape = input_shape + (hidden_states.size(-1),)
+        output_shape = tokens_shape + (hidden_states.size(-1),)
         
         return hidden_states.view(*output_shape), presents
 
@@ -194,10 +193,10 @@ class GPT2LMHead(nn.Module):
         self.decoder = nn.Linear(embed_shape[1], embed_shape[0], bias=False)
         self.decoder.weight = model_embeddings_weights  # Tied weights
 
-    def forward(self, hidden_state):
+    def forward(self, hidden_states):
         # Truncated Language modeling logits (we remove the last token)
         # h_trunc = h[:, :-1].contiguous().view(-1, self.n_embd)
-        lm_logits = self.decoder(hidden_state)
+        lm_logits = self.decoder(hidden_states)
         return lm_logits
 
 class GPT2LMHeadModel(nn.Module):
@@ -211,20 +210,18 @@ class GPT2LMHeadModel(nn.Module):
         """
         self.lm_head.set_embeddings_weights(self.transformer.wte.weight)
 
-    def forward(self,
-                input_ids,
-                position_ids=None,
-                token_type_ids=None,
-                lm_labels=None,
-                past=None):
+    def forward(self, 
+                node: GPT2Node,
+                positions: Optional[torch.Tensor]=None,
+                token_type_ids: Optional[torch.Tensor]=None, 
+                lm_labels: Optional[torch.Tensor]=None) -> GPT2Node:
         
-        # if past is not None:
-        #     for j, p in enumerate(past):
-        #         if p is None:
-        #             continue
-        #         past[j] = p[..., -1023:,:]
+        hidden_states, presents = self.transformer(
+            node, positions=positions,
+            token_type_ids=token_type_ids)
+
+        print(presents)
         
-        hidden_states, presents = self.transformer(input_ids, position_ids, token_type_ids, past)
         lm_logits = self.lm_head(hidden_states)
         
         if lm_labels is not None:
@@ -232,4 +229,6 @@ class GPT2LMHeadModel(nn.Module):
             loss = loss_fct(lm_logits.view(-1, lm_logits.size(-1)), lm_labels.view(-1))
             return loss
         
-        return lm_logits, presents
+        return GPT2Node(parent=node, 
+                        presents=presents,
+                        logits=lm_logits)
