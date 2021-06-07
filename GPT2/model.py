@@ -73,6 +73,7 @@ class Attention(nn.Module):
     def split_heads(self, x, k=False):
         new_x_shape = x.size()[:-1] + (self.n_head, x.size(-1) // self.n_head)
         x = x.view(*new_x_shape)  # in Tensorflow implem: fct split_states
+        
         if k:
             return x.permute(0, 2, 3, 1)  # (batch, head, head_features, seq_length)
         else:
@@ -84,7 +85,6 @@ class Attention(nn.Module):
         query = self.split_heads(query)
         present_key = self.split_heads(present_key, k=True)
         present_value = self.split_heads(present_value)
-        
         if layer_past is not None:
             past_key, past_value = layer_past[0].transpose(-2, -1), layer_past[1]  # transpose back cf below
             key = torch.cat((past_key, present_key), dim=-1)
@@ -92,8 +92,8 @@ class Attention(nn.Module):
         else:
             key = present_key
             value = present_value
-        
         present = torch.stack((present_key.transpose(-2, -1), present_value))  # transpose to have same shapes for stacking
+        
         a = self._attn(query, key, value)
         a = self.merge_heads(a)
         a = self.c_proj(a)
@@ -148,18 +148,20 @@ class GPT2Model(nn.Module):
 
     def forward(self, node, positions=None, token_type_ids=None):
 
+        tokens = torch.tensor([[node.token]], dtype=torch.long)
+
         if positions is None:
             positions = torch.arange(
-                len(node), 
-                node.tokens.size(-1) + len(node),
+                len(node)-1, 
+                tokens.size(-1) + len(node)-1,
                 dtype=torch.long
-            ).unsqueeze(0).expand_as(node.tokens)
+            ).unsqueeze(0).expand_as(tokens)
 
-        tokens_shape = node.tokens.size()
-        tokens = node.tokens.view(-1, node.tokens.size(-1))
+        tokens_shape = tokens.size()
+        tokens = tokens.view(-1, tokens.size(-1))
         positions = positions.view(-1, positions.size(-1))
 
-        token_embeddings = self.wte(node.tokens)
+        token_embeddings = self.wte(tokens)
         position_embeddings = self.wpe(positions)
         
         # TODO: Understand token_type and move this to GPT2Node
@@ -220,8 +222,6 @@ class GPT2LMHeadModel(nn.Module):
             node, positions=positions,
             token_type_ids=token_type_ids)
 
-        print(presents)
-        
         lm_logits = self.lm_head(hidden_states)
         
         if lm_labels is not None:
@@ -231,4 +231,4 @@ class GPT2LMHeadModel(nn.Module):
         
         return GPT2Node(parent=node, 
                         presents=presents,
-                        logits=lm_logits)
+                        logits=lm_logits[0, -1, :])

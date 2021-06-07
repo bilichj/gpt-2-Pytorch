@@ -9,27 +9,26 @@ class Node:
     
     @property
     def anscestors(self):
-        anscestor = self
-        while anscestor is not None:
-            yield anscestor
-            anscestor = anscestor.parent
+        if self.parent is None:
+            return [self]
+        return self.parent.anscestors + [self]
 
 class GPT2Node(Node):
     def __init__(self,
                 parent: Optional[GPT2Node]=None,
-                token_id: Optional[int]=None,
+                token: Optional[int]=None,
                 presents: Optional[torch.Tensor]=None,
                 logits: Optional[torch.Tensor]=None,
                 *args, **kwargs):
         
         super().__init__(parent, *args, **kwargs)
 
-        self.token_id = token_id
+        self.token = token
         self.presents = presents
         self.logits = logits
     
     def __len__(self):
-        return len(list(self.anscestors))
+        return len(self.anscestors)
     
     @property
     def presents(self):
@@ -45,14 +44,17 @@ class GPT2Node(Node):
     @property
     def tokens(self) -> torch.Tensor:
         return torch.tensor([
-            list(n.token_id for n in self.anscestors)
+            [n.token for n in self.anscestors]
             ], dtype=torch.long)
-
+    
     @property
     def past(self):
         if self.parent is None:
             return [None for _ in range(12)]
-        return [torch.cat(X, dim=-2) for X in zip(*(n.presents for n in self.anscestors))]
+        result = []
+        for j in range(12):
+            result.append(torch.cat([n.presents[j] for n in self.anscestors], dim=-2))
+        return result
 
     @property
     def root(self):
